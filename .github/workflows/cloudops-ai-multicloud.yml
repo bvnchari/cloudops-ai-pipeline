@@ -138,8 +138,9 @@ jobs:
           IMAGE_TAG="${{ github.event.inputs.image_tag }}"
           case "${{ github.event.inputs.cloud_provider }}" in
             azure)
-              az acr build --registry $(echo ${{ needs.terraform.outputs.registry }} | cut -d. -f1) \
-                --image cloudops-ai:$IMAGE_TAG ./app-src
+              az acr login --name $(echo ${{ needs.terraform.outputs.registry }} | cut -d. -f1)
+              docker build -t ${{ needs.terraform.outputs.registry }}/cloudops-ai:$IMAGE_TAG ./app-src
+              docker push ${{ needs.terraform.outputs.registry }}/cloudops-ai:$IMAGE_TAG
               ;;
             gcp)
               gcloud builds submit ./app-src --tag ${{ needs.terraform.outputs.registry }}/cloudops-ai:$IMAGE_TAG
@@ -153,7 +154,10 @@ jobs:
 
       - name: Render manifest with image
         run: |
-          IMAGE="${{ needs.terraform.outputs.registry }}:${{ github.event.inputs.image_tag }}"
+          case "${{ github.event.inputs.cloud_provider }}" in
+            azure|gcp) IMAGE="${{ needs.terraform.outputs.registry }}/cloudops-ai:${{ github.event.inputs.image_tag }}" ;;
+            aws)       IMAGE="${{ needs.terraform.outputs.registry }}:${{ github.event.inputs.image_tag }}" ;;
+          esac
           sed "s|__IMAGE__|$IMAGE|" k8s/app-deployment.yaml > k8s/app-deployment.rendered.yaml
 
       - name: Deploy to cluster
