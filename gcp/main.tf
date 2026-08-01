@@ -37,6 +37,29 @@ resource "kubernetes_namespace" "cloudops_ai" {
   depends_on = [google_container_cluster.cloudops_ai]
 }
 
+# GCP IAM roles (e.g. roles/editor) do NOT automatically grant Kubernetes RBAC
+# permissions inside the cluster — GKE authenticates the IAM identity, but
+# authorization for cluster-scoped objects (like ClusterRoles, which Helm's
+# kube-prometheus-stack needs for its admission webhook) requires an explicit
+# Kubernetes RBAC binding. This grants the pipeline's service account
+# cluster-admin at the Kubernetes layer.
+resource "kubernetes_cluster_role_binding" "gha_cluster_admin" {
+  metadata {
+    name = "gha-cluster-admin"
+  }
+  role_ref {
+    api_group = "rbac.authorization.k8s.io"
+    kind      = "ClusterRole"
+    name      = "cluster-admin"
+  }
+  subject {
+    kind      = "User"
+    name      = "cloudops-ai-gha@${var.project_id}.iam.gserviceaccount.com"
+    api_group = "rbac.authorization.k8s.io"
+  }
+  depends_on = [google_container_cluster.cloudops_ai]
+}
+
 # kube-prometheus-stack via Helm — node-exporter disabled (Autopilot blocks
 # it via Pod Security Standards, per your earlier runbook notes)
 resource "helm_release" "monitoring" {
@@ -45,6 +68,7 @@ resource "helm_release" "monitoring" {
   repository = "https://prometheus-community.github.io/helm-charts"
   chart      = "kube-prometheus-stack"
   timeout    = 600
+  depends_on = [kubernetes_cluster_role_binding.gha_cluster_admin]
 
   set {
     name  = "grafana.service.type"
@@ -56,6 +80,26 @@ resource "helm_release" "monitoring" {
   }
   set {
     name  = "prometheus-node-exporter.enabled"
+    value = "false"
+  }
+  # GKE Autopilot protects kube-system as a managed namespace — these
+  # components try to create Services there to scrape the control plane,
+  # which Autopilot blocks outright (Google manages the control plane
+  # separately). Standard/documented fix for kube-prometheus-stack on GKE.
+  set {
+    name  = "kubeControllerManager.enabled"
+    value = "false"
+  }
+  set {
+    name  = "kubeScheduler.enabled"
+    value = "false"
+  }
+  set {
+    name  = "kubeProxy.enabled"
+    value = "false"
+  }
+  set {
+    name  = "kubeEtcd.enabled"
     value = "false"
   }
 }
