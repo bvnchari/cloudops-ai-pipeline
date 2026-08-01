@@ -103,6 +103,8 @@ jobs:
     if: github.event.inputs.action != 'destroy' && github.event.inputs.app_source != 'skip'
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
+
       - name: Azure login
         if: github.event.inputs.cloud_provider == 'azure'
         uses: azure/login@v2
