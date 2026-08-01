@@ -42,6 +42,10 @@ resource "azurerm_kubernetes_cluster" "cloudops_ai" {
     type = "SystemAssigned"
   }
 
+  # Azure enables this by default on new clusters now; declaring it
+  # explicitly avoids Terraform trying to "disable" it on refresh.
+  oidc_issuer_enabled = true
+
   tags = {
     project = "cloudops-ai"
     purpose = "aiops-demo-and-az-cert-prep"
