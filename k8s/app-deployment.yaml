@@ -19,6 +19,10 @@ spec:
           image: __IMAGE__          # replaced by pipeline: <acr_login_server>/cloudops-ai:<tag>
           ports:
             - containerPort: 8501
+          volumeMounts:
+            - name: streamlit-secrets
+              mountPath: /app/.streamlit
+              readOnly: true
           readinessProbe:
             httpGet:
               path: /_stcore/health
@@ -32,6 +36,10 @@ spec:
             limits:
               cpu: 500m
               memory: 512Mi
+      volumes:
+        - name: streamlit-secrets
+          secret:
+            secretName: cloudops-ai-secrets
 ---
 apiVersion: v1
 kind: Service
