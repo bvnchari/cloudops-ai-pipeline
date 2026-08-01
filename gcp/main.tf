@@ -43,22 +43,14 @@ resource "kubernetes_namespace" "cloudops_ai" {
 # kube-prometheus-stack needs for its admission webhook) requires an explicit
 # Kubernetes RBAC binding. This grants the pipeline's service account
 # cluster-admin at the Kubernetes layer.
-resource "kubernetes_cluster_role_binding" "gha_cluster_admin" {
-  metadata {
-    name = "gha-cluster-admin"
-  }
-  role_ref {
-    api_group = "rbac.authorization.k8s.io"
-    kind      = "ClusterRole"
-    name      = "cluster-admin"
-  }
-  subject {
-    kind      = "User"
-    name      = "cloudops-ai-gha@${var.project_id}.iam.gserviceaccount.com"
-    api_group = "rbac.authorization.k8s.io"
-  }
-  depends_on = [google_container_cluster.cloudops_ai]
-}
+# NOTE: the GHA service account's cluster-admin RBAC binding is created
+# manually, once, as a project-owner bootstrap step — NOT managed here.
+# Terraform's own identity can't grant itself permissions it doesn't yet
+# have (a ClusterRoleBinding can't create the ClusterRoleBinding that
+# grants the right to create ClusterRoleBindings). Run once per cluster:
+#   kubectl create clusterrolebinding gha-cluster-admin \
+#     --clusterrole=cluster-admin \
+#     --user=cloudops-ai-gha@<project-id>.iam.gserviceaccount.com
 
 # kube-prometheus-stack via Helm — node-exporter disabled (Autopilot blocks
 # it via Pod Security Standards, per your earlier runbook notes)
@@ -68,7 +60,6 @@ resource "helm_release" "monitoring" {
   repository = "https://prometheus-community.github.io/helm-charts"
   chart      = "kube-prometheus-stack"
   timeout    = 600
-  depends_on = [kubernetes_cluster_role_binding.gha_cluster_admin]
 
   set {
     name  = "grafana.service.type"
