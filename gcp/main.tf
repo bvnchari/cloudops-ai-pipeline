@@ -93,4 +93,16 @@ resource "helm_release" "monitoring" {
     name  = "kubeEtcd.enabled"
     value = "false"
   }
+  set {
+    name  = "coreDns.enabled"
+    value = "false"
+  }
+  # Redundant with prometheus-node-exporter.enabled above — some chart
+  # versions expose the node-exporter toggle under this key instead;
+  # setting both guarantees it's actually disabled (unknown keys are
+  # silently ignored by Helm, so this is safe either way).
+  set {
+    name  = "nodeExporter.enabled"
+    value = "false"
+  }
 }
