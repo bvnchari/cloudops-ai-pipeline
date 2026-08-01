@@ -1,0 +1,46 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cloudops-ai
+  labels:
+    app: cloudops-ai
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: cloudops-ai
+  template:
+    metadata:
+      labels:
+        app: cloudops-ai
+    spec:
+      containers:
+        - name: cloudops-ai
+          image: __IMAGE__          # replaced by pipeline: <acr_login_server>/cloudops-ai:<tag>
+          ports:
+            - containerPort: 8501
+          readinessProbe:
+            httpGet:
+              path: /_stcore/health
+              port: 8501
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: cloudops-ai-svc
+spec:
+  type: LoadBalancer
+  selector:
+    app: cloudops-ai
+  ports:
+    - port: 80
+      targetPort: 8501

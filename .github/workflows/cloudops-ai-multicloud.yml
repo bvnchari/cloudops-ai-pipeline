@@ -1,0 +1,163 @@
+name: CloudOps-AI Multi-Cloud Pipeline
+
+on:
+  workflow_dispatch:
+    inputs:
+      cloud_provider:
+        description: "Which cloud to target"
+        required: true
+        type: choice
+        options: [azure, gcp, aws]
+      action:
+        description: "What to do"
+        required: true
+        type: choice
+        options: [apply, deploy-only, destroy]
+        default: apply
+      app_source:
+        description: "Git URL of the app to deploy (Dockerfile at root), or 'skip'"
+        required: false
+        default: "https://github.com/bvnchari/cloudops-ai"
+      image_tag:
+        description: "Image tag to build/deploy"
+        required: false
+        default: "latest"
+
+jobs:
+  terraform:
+    name: Terraform (${{ github.event.inputs.cloud_provider }} / ${{ github.event.inputs.action }})
+    runs-on: ubuntu-latest
+    outputs:
+      registry: ${{ steps.tf_out.outputs.registry }}
+      cluster_name: ${{ steps.tf_out.outputs.cluster_name }}
+    defaults:
+      run:
+        working-directory: ${{ github.event.inputs.cloud_provider }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # --- Cloud auth (only the block for the selected provider runs) ---
+      - name: Azure login
+        if: github.event.inputs.cloud_provider == 'azure'
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: GCP login
+        if: github.event.inputs.cloud_provider == 'gcp'
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_CREDENTIALS }}
+
+      - name: AWS login
+        if: github.event.inputs.cloud_provider == 'aws'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ap-south-1
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+
+      - name: Terraform init
+        if: github.event.inputs.action != 'deploy-only'
+        run: |
+          if [ "${{ github.event.inputs.cloud_provider }}" = "gcp" ]; then
+            terraform init -backend-config="bucket=${{ secrets.GCP_TFSTATE_BUCKET }}" -var="project_id=${{ secrets.GCP_PROJECT_ID }}"
+          else
+            terraform init
+          fi
+
+      - name: Terraform apply
+        if: github.event.inputs.action == 'apply'
+        run: |
+          if [ "${{ github.event.inputs.cloud_provider }}" = "gcp" ]; then
+            terraform apply -auto-approve -var="project_id=${{ secrets.GCP_PROJECT_ID }}"
+          else
+            terraform apply -auto-approve
+          fi
+
+      - name: Terraform destroy
+        if: github.event.inputs.action == 'destroy'
+        run: |
+          if [ "${{ github.event.inputs.cloud_provider }}" = "gcp" ]; then
+            terraform destroy -auto-approve -var="project_id=${{ secrets.GCP_PROJECT_ID }}"
+          else
+            terraform destroy -auto-approve
+          fi
+
+      - name: Capture outputs
+        id: tf_out
+        if: github.event.inputs.action != 'destroy'
+        run: |
+          case "${{ github.event.inputs.cloud_provider }}" in
+            azure) echo "registry=$(terraform output -raw acr_login_server)" >> "$GITHUB_OUTPUT" ;;
+            gcp)   echo "registry=$(terraform output -raw artifact_registry_repo)" >> "$GITHUB_OUTPUT" ;;
+            aws)   echo "registry=$(terraform output -raw ecr_repository_url)" >> "$GITHUB_OUTPUT" ;;
+          esac
+          echo "cluster_name=$(terraform output -raw cluster_name)" >> "$GITHUB_OUTPUT"
+
+  build-and-deploy:
+    name: Build image & deploy app
+    needs: terraform
+    if: github.event.inputs.action != 'destroy' && github.event.inputs.app_source != 'skip'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Azure login
+        if: github.event.inputs.cloud_provider == 'azure'
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: GCP login
+        if: github.event.inputs.cloud_provider == 'gcp'
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_CREDENTIALS }}
+
+      - name: AWS login
+        if: github.event.inputs.cloud_provider == 'aws'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ap-south-1
+
+      - name: Get cluster credentials
+        run: |
+          case "${{ github.event.inputs.cloud_provider }}" in
+            azure) az aks get-credentials --resource-group cloudops-ai-rg --name ${{ needs.terraform.outputs.cluster_name }} --overwrite-existing ;;
+            gcp)   gcloud container clusters get-credentials ${{ needs.terraform.outputs.cluster_name }} --region asia-south1 ;;
+            aws)   aws eks update-kubeconfig --name ${{ needs.terraform.outputs.cluster_name }} --region ap-south-1 ;;
+          esac
+
+      - name: Clone app source
+        run: git clone ${{ github.event.inputs.app_source }} app-src
+
+      - name: Build & push image
+        run: |
+          IMAGE_TAG="${{ github.event.inputs.image_tag }}"
+          case "${{ github.event.inputs.cloud_provider }}" in
+            azure)
+              az acr build --registry $(echo ${{ needs.terraform.outputs.registry }} | cut -d. -f1) \
+                --image cloudops-ai:$IMAGE_TAG ./app-src
+              ;;
+            gcp)
+              gcloud builds submit ./app-src --tag ${{ needs.terraform.outputs.registry }}/cloudops-ai:$IMAGE_TAG
+              ;;
+            aws)
+              aws ecr get-login-password --region ap-south-1 | docker login --username AWS --password-stdin ${{ needs.terraform.outputs.registry }}
+              docker build -t ${{ needs.terraform.outputs.registry }}:$IMAGE_TAG ./app-src
+              docker push ${{ needs.terraform.outputs.registry }}:$IMAGE_TAG
+              ;;
+          esac
+
+      - name: Render manifest with image
+        run: |
+          IMAGE="${{ needs.terraform.outputs.registry }}:${{ github.event.inputs.image_tag }}"
+          sed "s|__IMAGE__|$IMAGE|" k8s/app-deployment.yaml > k8s/app-deployment.rendered.yaml
+
+      - name: Deploy to cluster
+        run: |
+          kubectl apply -f k8s/app-deployment.rendered.yaml
+          kubectl rollout status deployment/cloudops-ai --timeout=180s
+          kubectl get svc cloudops-ai-svc
